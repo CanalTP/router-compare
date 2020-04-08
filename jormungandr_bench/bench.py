@@ -4,23 +4,26 @@
 Usage:
   bench.py (-h | --help)
   bench.py --version
-  bench.py bench [-i FILE | --input=FILE] [-a ARGS | --extra-args=ARGS] [-c CONCURRENT | --concurrent=CONCURRENT]
+  bench.py bench [-i FILE | --input=FILE] [-a ARGS | --extra-args=ARGS] [-c CONCURRENT | --concurrent=CONCURRENT] [--scenario=SCENARIO]...
   bench.py replot [<file> <file>]
   bench.py plot-latest N
-   
+  bench.py sample <min_lon> <max_lon> <min_lat> <max_lat> <size> [-a ARGS | --extra-args=ARGS] [-s SEED | --seed=SEED]
+
 Options:
   -h --help                                 Show this screen.
   --version                                 Show version.
-  -i <FILE>, --input=<FILE>                 Input csv (or stdin if missing)
-  -a <ARGS>, --extra-args=<ARGS>            Extra args for the request
-  -c <CONCURRENT>, --concurrent=CONCURRENT  Concurrent request number
+  -i FILE, --input=FILE                     Input csv (or stdin if missing)
+  -a ARGS, --extra-args=ARGS                Extra args for the request
+  -c CONCURRENT, --concurrent=CONCURRENT    Concurrent request number
+  --scenario=SCENARIO                       Scenarios [default: new_default  experimental]
+  -s SEED, --seed=SEED                      Random seed [default: 42]
 
 Example:
   bench.py bench --input=benchmark_example.csv -a 'first_section_mode[]=car&last_section_mode[]=car'
-  cat benchmark_example.csv | bench.py bench  -a 'first_section_mode[]=car&last_section_mode[]=car'
+  cat benchmark_example.csv | bench.py bench  -a 'first_section_mode[]=car&last_section_mode[]=car' --scenario= new_default
   bench.py replot new_default.csv experimental.csv
   bench.py plot-latest 30
-   
+  bench.py sample 2.298255 2.411574 48.821590 48.898 1000 -a '&datetime=20200318T100000'
 """
 from __future__ import print_function
 import requests
@@ -36,7 +39,7 @@ import sortedcontainers
 from glob import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import fileinput
-
+import random
 
 NAVITIA_API_URL = os.getenv('NAVITIA_API_URL', config.NAVITIA_API_URL)
 COVERAGE = os.getenv('COVERAGE', config.COVERAGE)
@@ -64,31 +67,37 @@ def _call_jormun(url):
     return r, elapsed_time
 
 
-def plot_per_request(array1, array2, label1='', label2=''):
+def plot_per_request(data):
     line_chart = pygal.Line(show_x_labels=False)
     line_chart.title = 'Jormun Bench (in ms)'
-    line_chart.x_labels = map(str, range(0, len(array1)))
-    line_chart.add(label1, array1)
-    line_chart.add(label2, array2)
+    for label, array in data:
+        line_chart.add(label, array)
+        line_chart.x_labels = map(str, range(0, len(array)))
     line_chart.render_to_file('output_per_request.svg')
 
 
-def plot_normalized_box(array1, array2, label1='', label2=''):
-    import numpy as np
+def plot_normalized_box(data):
     box = pygal.Box()
-    box.title = 'Jormun Bench Box Comparaison (in ms)'
-    box.add('Time Ratio: {}/{}'.format(label2, label1), np.array(array2) / np.array(array1))
+    box.title = 'Jormun Bench Box'
+
+    for label, array in data:
+        box.add(label, array)
+
     box.render_to_file('output_box.svg')
 
 
-def call_jormun(server, path, parameters, scenario_name, extra_args):
-    url = "{}{}?{}&_override_scenario={}&{}".format(server, path, parameters, scenario_name, extra_args)
+def call_jormun(server, coverage, path, parameters, scenario_name, extra_args):
+    import os.path
+    # remove excessive /
+    normpath = os.path.normpath('/'.join(['coverage', coverage, path]))
+
+    url = "{}/{}?{}&_override_scenario={}&{}".format(server, normpath, parameters, scenario_name, extra_args)
     ret, t = _call_jormun(url)
     return url, t, ret.status_code
 
 
-def call_jormun_scenario(i, server, path, parameters, extra_args, scenario):
-    return i, call_jormun(server, path, parameters, scenario, extra_args)
+def call_jormun_scenario(i, server, coverage, path, parameters, scenario, extra_args):
+    return i, call_jormun(server, coverage, path, parameters, scenario, extra_args)
 
 
 class Scenario(object):
@@ -104,7 +113,7 @@ class Scenario(object):
 
 def submit_work(pool, reqs, extra_args, scenario):
     for i, (path, params) in enumerate(reqs):
-        args = [i, NAVITIA_API_URL, path, params, extra_args, scenario]
+        args = [i, NAVITIA_API_URL, COVERAGE, path, params, extra_args, scenario]
         yield pool.submit(call_jormun_scenario, *args)
 
 
@@ -119,7 +128,7 @@ def bench(args):
 
     reqs = make_requests(args['--input'] or '-')
 
-    scenarios = {s: Scenario(s, OUTPUT_DIR) for s in ['new_default', 'experimental']}
+    scenarios = {s: Scenario(s, OUTPUT_DIR) for s in args['--scenario']}
 
     for name, scenario in scenarios.items():
         logger.info('Launching bench for {}'.format(name))
@@ -134,11 +143,8 @@ def bench(args):
                 print("{},{},{},{}".format(idx, url, time, status_code), file=output)
                 scenario.times[idx] = time
 
-    new_default_times = scenarios['new_default'].times.values()
-    experimental_times = scenarios['experimental'].times.values()
-    
-    plot_per_request(new_default_times, experimental_times, 'new_default', 'experimental')
-    plot_normalized_box(new_default_times, experimental_times, 'new_default', 'experimental')
+    plot_per_request([(name, s.times.values()) for name, s in scenarios.items()])
+    plot_normalized_box([(name, s.times.values()) for name, s in scenarios.items()])
 
 
 def get_times(csv_path):
@@ -162,8 +168,8 @@ def replot(args):
     file2 = files[1]
     time_arry1 = get_times(file1)
     time_arry2 = get_times(file2)
-    plot_per_request(time_arry1, time_arry2, file1, file2)
-    plot_normalized_box(time_arry1, time_arry2, file1, file2)
+    plot_per_request([(file1, time_arry1), (file2, time_arry2)])
+    plot_normalized_box([(file1, time_arry1), (file2, time_arry2)])
 
 
 def get_benched_coverage_from_output():
@@ -195,6 +201,30 @@ def plot_latest(args):
         box.render_to_file(os.path.join(DISTANT_BENCH_OUTPUT, 'rendering', '{}.svg'.format(coverage_name)))
 
 
+def sample(args):
+    min_lon = float(args['<min_lon>'])
+    max_lon = float(args['<max_lon>'])
+    min_lat = float(args['<min_lat>'])
+    max_lat = float(args['<max_lat>'])
+    n = int(args['<size>'])
+
+    extra_args = args['--extra-args'] or ''
+
+    header = ['path', 'parameters']
+    print(','.join(header))
+
+    path = '/journeys'
+
+    for _ in range(n):
+        from_coord = "{};{}".format(random.uniform(min_lon, max_lon),
+                                    random.uniform(min_lat, max_lat))
+        to_coord = "{};{}".format(random.uniform(min_lon, max_lon),
+                                  random.uniform(min_lat, max_lat))
+
+        params = 'from={}&to={}&{}'.format(from_coord, to_coord, extra_args)
+        print(','.join([path, params]))
+
+
 def parse_args():
     from docopt import docopt
     return docopt(__doc__, version='Jormungandr Bench V0.0.1')
@@ -209,6 +239,8 @@ def main():
         replot(args)
     if args.get('plot-latest'):
         plot_latest(args)
+    if args.get('sample'):
+        sample(args)
 
 
 if __name__ == '__main__':
