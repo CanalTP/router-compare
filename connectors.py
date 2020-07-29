@@ -7,6 +7,7 @@ import math
 import auth_params
 
 GOOGLE_TOKEN = auth_params.google_api_key
+MAPBOX_TOKEN = auth_params.mapbox_api_key
 NAVITIA_TOKEN = auth_params.navitia_api_key
 NAVITIA_URL = auth_params.navitia_base_url
 
@@ -81,6 +82,39 @@ def get_distance_and_duration_from_google_directions(from_tuple, to_tuple, mode)
         return
 
     return {'distance' : google_response['routes'][0]['legs'][0]['distance']['value'], 'duration': google_response['routes'][0]['legs'][0]['duration']['value']}
+
+def get_distance_and_duration_from_mapbox_directions(from_tuple, to_tuple, mode):
+    """
+    Uses Mapbox directions API to compute journey and extract duration & distance
+    """
+
+
+    if not mode_is_valid(mode):
+        logger.error("The mode {} is not valid. The allowed modes are walking, bicycling, driving".format(mode))
+        return
+
+    mapbox_mode_mapping = {"walking": "walking", "driving" : "driving-traffic", "bicycling": "cycling"}
+
+    origin = "{},{}".format(from_tuple[1], from_tuple[0])
+    destination = "{},{}".format(to_tuple[1], to_tuple[0])
+
+    url_params = {"access_token": MAPBOX_TOKEN}
+    url = "https://api.mapbox.com/directions/v5/mapbox/"
+    url += mapbox_mode_mapping[mode]
+    url += "/{}%3B{}.json".format(origin, destination)
+    call = requests.get(url, params=url_params)
+
+    logger.debug(call.url)
+
+    if call.status_code != 200 :
+        logger.error("Mapbox API error - status code : {}".format(call.status_code))
+        return
+    mapbox_response = call.json()
+    if mapbox_response['code'] != "Ok" :
+        logger.error("Mapbox API error - message : {}".format(mapbox_response['status']))
+        return
+
+    return {'distance' : mapbox_response['routes'][0]['distance'], 'duration': mapbox_response['routes'][0]['duration']}
 
 def get_crow_fly_distance(from_tuple,to_tuple):
     """
